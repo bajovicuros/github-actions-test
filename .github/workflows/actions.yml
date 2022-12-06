@@ -1,12 +1,21 @@
 name: Actions Workflow
 
 on: 
-  schedule:
-    - cron: "0/5 * * * *"
-    - cron: "0/6 * * * *"
+  push:
+    branches:
+      - master
+    tags:
+      - v1.*
+    paths:
+      - '**.js'
+  # repository_dispatch:
+  #   types: [build]
+  # schedule:
+  #   # - cron: "0/5 * * * *"
+  #   # - cron: "0/6 * * * *"
   # push:
-  pull_request:
-    types: [closed, assigned, opened, reopened]
+  # pull_request:
+  #   types: [closed, assigned, opened, reopened]
 
 jobs:
   run-gitlub-actions:
