@@ -1,0 +1,144 @@
+---
+- hosts: all
+  tasks:
+    - name: Load inventory
+      setup: {}
+
+- hosts: registry
+  vars_prompt:
+    - name: component_version
+      prompt: '{{ component }} repo version'
+      default: '{{ contact_version }}'
+      private: false
+
+  tasks:
+    - name: Register version for later use
+      set_fact:
+        component_version_fact: "{{ component_version }}"
+
+    - name: Pull {{ component }} image from remote registry
+      docker_image:
+        name: "{{ remote_registry }}/omni/{{ component }}:{{ component_version }}"
+        force: true
+        pull: true
+        push: false
+
+    - name: Tag and push to local registry
+      docker_image:
+        name: "{{ remote_registry }}/omni/{{ component }}:{{ component_version }}"
+        repository: "{{ local_registry }}/{{ project }}/{{ component }}:{{ component_version }}"
+        force: true
+        pull: false
+        push: true
+      when: not use_ali_registry
+
+    - name: Tag and push to ali registry
+      docker_image:
+        name: "{{ remote_registry }}/omni/{{ component }}:{{ component_version }}"
+        repository: "{{ ali_registry }}/{{ project }}/{{ component }}:{{ component_version }}"
+        force: true
+        pull: false
+        push: true
+      when: use_ali_registry
+
+- hosts: admin
+  vars:
+    component_version: "{{ hostvars[groups['registry'][0]]['component_version_fact'] }}"
+    docker_registry: "{% if use_ali_registry %}{{ ali_registry }}{% else %}{{ local_registry }}{% endif %}"
+    timestamp: "{{ lookup('pipe', 'date +%s') }}"
+
+  tasks:
+    - name: Mount remote NFS
+      mount:
+        src: "{{ nfs_host }}:/{{ pv_path_prefix }}"
+        path: /mnt
+        fstype: nfs
+        state: mounted
+
+    - name: Create {{ component }} folder
+      file:
+        name: /mnt/{{ item }}/{{ env }}
+        state: directory
+      with_items:
+        - "{{ component }}"
+
+    - name: Create {{ component }} folder
+      file:
+        name: /mnt/{{ item }}/{{ env }}
+        state: directory
+      with_items:
+        - "{{ component }}-keys"
+
+    - name: Copy salesforce key
+      copy:
+        content: "{{ salesforce_key }}"
+        dest: "/mnt/{{ component }}-keys/{{ env }}/server.key"
+
+    - name: Unmount remote NFS
+      mount:
+        src: "{{ nfs_host }}:/{{ pv_path_prefix }}"
+        path: /mnt
+        fstype: nfs
+        state: absent
+
+    - name: Prepare k8s config folder for {{ component }}
+      file:
+        name: /opt/{{ project }}/k8s/{{ env }}/{{ component }}
+        state: directory
+
+    - name: Generate k8s config files for {{ component }}
+      template:
+        src: k8s/{{ component }}/{{ item }}
+        dest: /opt/{{ project }}/k8s/{{ env }}/{{ component }}/{{ item }}
+      with_items:
+        - config.yml
+        - main.yml
+
+    - name: Remove existing job first
+      k8s:
+        name: "{{ component }}-setup"
+        namespace: "{{ namespace }}"
+        kind: Job
+        state: absent
+        kubeconfig: /opt/{{ project }}/k8s/{{ project }}.{{ env }}.config
+
+    - name: Adding ConfigMap & Secret for {{ component }}
+      k8s:
+        src: /opt/{{ project }}/k8s/{{ env }}/{{ component }}/config.yml
+        state: present
+        kubeconfig: /opt/{{ project }}/k8s/{{ project }}.{{ env }}.config
+        force: true
+
+    - name: Deploying {{ component }}
+      k8s:
+        src: /opt/{{ project }}/k8s/{{ env }}/{{ component }}/main.yml
+        state: present
+        kubeconfig: /opt/{{ project }}/k8s/{{ project }}.{{ env }}.config
+
+    - name: Get deployment status
+      k8s_facts:
+        api_version: v1
+        kind: Deployment
+        name: "{{ component }}"
+        namespace: "{{ namespace }}"
+        kubeconfig: /opt/{{ project }}/k8s/{{ project }}.{{ env }}.config
+      register: deployment_facts
+      until: deployment_facts.resources[0].status.unavailableReplicas is not defined
+      retries: 15
+      delay: 10
+
+    # - name: Wait until the resource responds with a valid answer
+    #   uri:
+    #     url: "http://{{ hostvars[groups['k8s-worker'][0]]['ansible_default_ipv4']['address'] }}:{{ item.port }}/health"
+    #     method: GET
+    #     return_content: true
+    #     status_code: "{{ item.status }}"
+    #   register: statusCode_output
+    #   until: statusCode_output.status == item.status
+    #   retries: 10
+    #   delay: 10
+    #   with_items:
+    #     - port: "{{ contact_external_port }}"
+    #       status: 200
+
+    # - import_tasks: ../run/annotation.yml
